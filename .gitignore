@@ -1,0 +1,10 @@
+# Never commit budget data
+*.db
+*.db-*
+*.bak
+*.sqlite
+*.csv
+seed/
+out/
+data/
+node_modules/
