@@ -211,8 +211,14 @@ const S = {
 
 // ---------- storage ----------
 const pending = {}; // docId -> {data, busy}
+// Every save carries a rising revision number. A snapshot holding an older
+// revision than the copy on screen is an out-of-date echo and is ignored.
+const revs = {};
+let revSeq = 0;
 function save(id, data) {
   if (!S.db || S.readOnly) return;
+  data._rev = Math.max(Date.now() * 1000 + (revSeq++ % 1000), (revs[id] || 0) + 1);
+  revs[id] = data._rev;
   const p = pending[id] || (pending[id] = { busy: false });
   p.data = B.clone(data);
   if (!p.busy) flush(id);
@@ -784,8 +790,9 @@ route();
 // ---------- boot ----------
 (async () => {
   const timer = setTimeout(() => { if (!S.ready) { S.error = "The budget storage didn't answer. Reload the page to try again."; render(); } }, 10000);
-  const db = await claude.use("db");
-  const user = await claude.use("user");
+  const use = n => (window.claude && window.claude.use) ? window.claude.use(n) : Promise.resolve(null);
+  const db = await use("db");
+  const user = await use("user");
   const uid = user && await user.id();
   if (!db || !uid) { clearTimeout(timer); S.error = "Open this page while signed in to claude.ai to see your budget."; render(); return; }
   S.db = db; S.uid = uid;
@@ -795,6 +802,8 @@ route();
       const id = d.id;
       if (pending[id]) continue; // our own write is on its way; keep the local copy
       const data = d.data();
+      if ((data._rev || 0) < (revs[id] || 0)) continue; // older than what's on screen
+      revs[id] = data._rev || 0;
       if (id === "plan") S.plan = data;
       else if (id === "imports") S.imports = data || { keys: [] };
       else if (id.startsWith("m-")) S.months[data.ym] = data;
