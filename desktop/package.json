@@ -1,0 +1,35 @@
+{
+  "name": "budgetapp",
+  "productName": "BudgetApp",
+  "version": "2.0.0",
+  "description": "Plan your months ahead, then track what actually happened.",
+  "author": "Tyler Dennis",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "com.tylerdennis.budgetapp",
+    "productName": "BudgetApp",
+    "files": ["main.js", "preload.js", "icon.png", "app/**"],
+    "directories": { "output": "dist" },
+    "win": { "target": "nsis", "icon": "icon.png", "artifactName": "BudgetApp-Setup-${version}.${ext}" },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "BudgetApp",
+      "uninstallDisplayName": "BudgetApp",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

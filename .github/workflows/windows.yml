@@ -1,0 +1,38 @@
+name: Windows app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "desktop/**", "build.py", ".github/workflows/windows.yml"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test logic
+        run: node tests/logic.test.js
+      - name: Build page
+        run: |
+          python build.py
+          New-Item -ItemType Directory -Force desktop/app | Out-Null
+          Copy-Item index.html desktop/app/index.html
+      - name: Build installer
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm install --no-audit --no-fund
+          npm run dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BudgetApp-Setup
+          path: desktop/dist/*.exe
+          if-no-files-found: error

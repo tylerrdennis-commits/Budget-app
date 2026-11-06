@@ -472,7 +472,7 @@ const S = {
   uid: null, db: null, ready: false, error: null,
   plan: null, months: {}, imports: { keys: [] },
   view: "month", ym: B.todayYm(), open: null, adding: null,
-  gen: null, imp: null, confirmClose: false, readOnly: false,
+  gen: null, imp: null, restore: null, local: null, confirmClose: false, readOnly: false,
 };
 
 // ---------- storage ----------
@@ -482,7 +482,7 @@ const pending = {}; // docId -> {data, busy}
 const revs = {};
 let revSeq = 0;
 function save(id, data) {
-  if (!S.db || S.readOnly) return;
+  if (!(S.db || S.local) || S.readOnly) return;
   data._rev = Math.max(Date.now() * 1000 + (revSeq++ % 1000), (revs[id] || 0) + 1);
   revs[id] = data._rev;
   const p = pending[id] || (pending[id] = { busy: false });
@@ -495,7 +495,8 @@ async function flush(id) {
   p.busy = true;
   const data = p.data; p.data = null;
   try {
-    await S.db.doc(`data/users/${S.uid}/${id}`).set(data);
+    if (S.local) await S.local.save(id, data);
+    else await S.db.doc(`data/users/${S.uid}/${id}`).set(data);
   } catch (e) {
     if (e && e.code === "invalid_argument") { S.readOnly = true; toast("You can view this budget but not change it."); render(); }
     else if (e && e.code === "quota_exceeded") toast("Storage is full. Your last change wasn't saved.");
@@ -503,6 +504,43 @@ async function flush(id) {
   }
   p.busy = false;
   if (p.data) flush(id); else delete pending[id];
+}
+function applyDoc(id, data) {
+  if (!data) return;
+  if (id === "plan") S.plan = data;
+  else if (id === "imports") S.imports = data || { keys: [] };
+  else if (id.startsWith("m-") && data.ym) S.months[data.ym] = data;
+}
+function backupJson() {
+  const docs = { plan: S.plan, imports: S.imports };
+  for (const ym of monthList()) docs["m-" + ym] = S.months[ym];
+  return JSON.stringify({ app: "BudgetApp", format: 1, exported: new Date().toISOString(), docs }, null, 1);
+}
+function readBackup(text) {
+  let b;
+  try { b = JSON.parse(text); } catch (e) { return "That file isn't a BudgetApp backup."; }
+  if (!b || b.app !== "BudgetApp" || !b.docs || !b.docs.plan) return "That file isn't a BudgetApp backup.";
+  const n = Object.keys(b.docs).filter(k => k.startsWith("m-")).length;
+  S.restore = { docs: b.docs, months: n, exported: b.exported };
+  render();
+  return null;
+}
+function restoreBackup() {
+  const docs = S.restore.docs;
+  S.months = {};
+  for (const [id, d] of Object.entries(docs)) { applyDoc(id, d); save(id, d); }
+  S.restore = null; S.view = "month"; S.ym = B.todayYm();
+  if (location.hash !== "#month") location.hash = "month"; else render();
+  toast("Backup restored.");
+}
+async function exportBackup() {
+  const name = `BudgetApp backup ${new Date().toISOString().slice(0, 10)}.json`;
+  try {
+    if (S.local) { const ok = await S.local.exportBackup(name, backupJson()); if (ok) toast("Backup saved."); return; }
+    const dl = window.claude && await window.claude.use("downloads");
+    if (!dl) { toast("Saving files isn't available here."); return; }
+    await dl.save({ filename: name, data: backupJson() });
+  } catch (e) { toast("The backup wasn't saved."); }
 }
 const saveMonth = m => save("m-" + m.ym, m);
 const savePlan = () => save("plan", S.plan);
@@ -535,15 +573,24 @@ function render() {
   document.querySelectorAll(".tabs a").forEach(a => a.dataset.view === S.view ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   if (S.error) $app.innerHTML = `<div class="status"><h2>Can't load your budget</h2><p class="muted">${esc(S.error)}</p></div>`;
   else if (!S.ready) $app.innerHTML = `<div class="status"><div class="spin"></div><div>Loading your budget…</div></div>`;
+  else if (S.restore) $app.innerHTML = renderRestore();
   else if (!S.plan) $app.innerHTML = renderWelcome();
   else $app.innerHTML = S.view === "plan" ? renderPlan() : S.view === "overview" ? renderOverview() : renderMonth();
   if (focusId) { const el = document.getElementById(focusId); if (el) { el.focus(); try { if (selS != null && el.setSelectionRange) el.setSelectionRange(selS, selS); } catch (e) {} } }
 }
 
+function renderRestore() {
+  const R = S.restore;
+  return `<section class="panel hero"><span class="eyebrow">Restore backup</span><h2>Replace your budget with this backup?</h2>
+  <p>The backup has your plan and ${R.months} month${R.months === 1 ? "" : "s"}${R.exported ? `, saved ${new Date(R.exported).toLocaleString("en-CA", { dateStyle: "medium", timeStyle: "short" })}` : ""}. ${S.plan ? "Everything currently in BudgetApp will be replaced." : ""}</p>
+  <div class="inline"><button class="btn pri" data-act="restore-yes">Restore backup</button><button class="btn ghost" data-act="restore-no">Cancel</button></div></section>`;
+}
+const importBtn = label => `<label class="btn" for="backupfile">${label}</label><input type="file" id="backupfile" accept=".json,application/json" hidden>`;
+
 function renderWelcome() {
   return `<section class="panel hero"><span class="eyebrow">Get started</span><h2>Set up your budget</h2>
   <p>Add your pay, your regular bills and any debts you're paying off. BudgetApp then builds each month for you, and you fill in what actually happened.</p>
-  <div class="inline"><button class="btn pri" data-act="start-plan">Start a plan</button></div></section>`;
+  <div class="inline"><button class="btn pri" data-act="start-plan">Start a plan</button>${importBtn("Restore a backup")}</div></section>`;
 }
 
 // ----- Month view -----
@@ -781,6 +828,8 @@ function renderPlan() {
   h += renderTmplTable("bills", "Recurring bills", "Bills that come every month, every two weeks, weekly or once a year.", dis);
   h += renderDebts(dis);
   h += renderRules(dis);
+  h += `<section class="panel"><h2>Backup</h2><p class="muted small">Save everything to one file, or restore from one. ${S.local ? "Your budget is stored on this PC." : "Use this to move your budget into the Windows app."}</p>
+    <div class="inline"><button class="btn" data-act="export">Save a backup</button>${S.readOnly ? "" : importBtn("Restore from backup…")}</div></section>`;
   return h;
 }
 
@@ -990,6 +1039,9 @@ document.addEventListener("click", e => {
       setTimeout(() => { const el = document.getElementById(`${t}-${item.id}-name`) || document.getElementById(`sv-${item.id}-name`); el && (el.focus(), el.select()); }, 0);
     },
     "t-del": () => { const t = b.dataset.t; S.plan[t] = S.plan[t].filter(x => x.id !== id); savePlan(); toast("Deleted. Build your months again to update future months."); },
+    export: () => { exportBackup(); return true; },
+    "restore-yes": () => { restoreBackup(); return true; },
+    "restore-no": () => { S.restore = null; },
     "rule-del": () => { S.plan.rules.splice(Number(b.dataset.i), 1); savePlan(); },
   };
   if (A[act]) { const skip = A[act](); if (!skip) render(); }
@@ -998,6 +1050,7 @@ document.addEventListener("click", e => {
 document.addEventListener("change", e => {
   const el = e.target;
   if (el.id === "csvfile" && el.files[0]) { el.files[0].text().then(readCsv); return; }
+  if (el.id === "backupfile" && el.files[0]) { el.files[0].text().then(t => { const err = readBackup(t); if (err) toast(err); }); el.value = ""; return; }
   if (el.dataset.imp != null) { const r = S.imp.rows[el.dataset.imp]; r.target = el.value; render(); return; }
   if (el.dataset.impname != null) { S.imp.rows[el.dataset.impname].name = el.value; return; }
   if (el.dataset.g) { S.gen[el.dataset.g] = el.dataset.g === "count" ? Number(el.value) : el.value; S.gen.result = null; render(); return; }
@@ -1055,6 +1108,16 @@ route();
 
 // ---------- boot ----------
 (async () => {
+  if (window.budgetStore) {
+    S.local = window.budgetStore;
+    try {
+      const docs = await S.local.load();
+      for (const [id, d] of Object.entries(docs || {})) applyDoc(id, d);
+      S.ready = true;
+    } catch (e) { S.error = "Couldn't read your budget file. " + (e && e.message || ""); }
+    render();
+    return;
+  }
   const timer = setTimeout(() => { if (!S.ready) { S.error = "The budget storage didn't answer. Reload the page to try again."; render(); } }, 10000);
   const use = n => (window.claude && window.claude.use) ? window.claude.use(n) : Promise.resolve(null);
   const db = await use("db");
@@ -1070,9 +1133,7 @@ route();
       const data = d.data();
       if ((data._rev || 0) < (revs[id] || 0)) continue; // older than what's on screen
       revs[id] = data._rev || 0;
-      if (id === "plan") S.plan = data;
-      else if (id === "imports") S.imports = data || { keys: [] };
-      else if (id.startsWith("m-")) S.months[data.ym] = data;
+      applyDoc(id, data);
     }
     for (const c of snap.docChanges ? snap.docChanges() : []) if (c.type === "removed" && c.doc.id.startsWith("m-")) delete S.months[c.doc.id.slice(2)];
     S.ready = true;
